@@ -1,0 +1,84 @@
+# 自动同步上游 tushen6/Tomorrow -> 300737/Tomorrow
+# 直接调用 GitHub 官方 merge-upstream 接口，等价于网页上的 "Sync fork" 按钮。
+# 不使用任何第三方 Action，不需要额外 Secret。
+name: Sync upstream (tushen6/Tomorrow)
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # 每小时第 17 分（UTC）检查一次上游
+  workflow_dispatch:        # 也可在 Actions 页面点 "Run workflow" 立即同步
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 同步上游 master
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO='${{ github.repository }}'
+          API="https://api.github.com/repos/$REPO"
+          out="$(mktemp)"
+          code="$(curl -sS -o "$out" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API/merge-upstream" \
+            -d '{"branch":"master"}')"
+          body="$(cat "$out")"
+          echo "HTTP $code: $body"
+          {
+            echo "## 上游同步结果"
+            echo ""
+            echo "- HTTP: \`$code\`"
+            echo "- 响应: \`$body\`"
+            echo "- 上游: \`tushen6/Tomorrow@master\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$code" in
+            200) echo "同步完成: $(echo "$body" | jq -r '.merge_type')" ;;
+            409) echo "::error::合并冲突：fork 的 master 有上游没有的改动，请到仓库页面手动 Sync fork 或处理冲突"; exit 1 ;;
+            422) echo "::error::同步被拒 422: $body"; exit 1 ;;
+            *)   echo "::error::同步失败 HTTP $code: $body"; exit 1 ;;
+          esac
+
+      - name: 保活（防止 60 天无活动被 GitHub 停掉定时任务）
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 只在 UTC 周日做一次轻量提交，让仓库保持"有活动"状态
+          [ "$(date -u +%u)" = "7" ] || { echo "非周日，跳过保活"; exit 0; }
+          REPO='${{ github.repository }}'
+          API="https://api.github.com/repos/$REPO"
+          BR='sync-heartbeat'
+          H=(-H "Authorization: Bearer $GH_TOKEN" \
+             -H "Accept: application/vnd.github+json" \
+             -H "X-GitHub-Api-Version: 2022-11-28")
+          ref="$(curl -sS "${H[@]}" "$API/git/ref/heads/$BR" | jq -r '.object.sha // empty')"
+          if [ -z "$ref" ]; then
+            master="$(curl -sS "${H[@]}" "$API/git/ref/heads/master" | jq -r '.object.sha')"
+            curl -sS "${H[@]}" -X POST "$API/git/refs" \
+              -d "{\"ref\":\"refs/heads/$BR\",\"sha\":\"$master\"}" > /dev/null
+          fi
+          sha="$(curl -sS "${H[@]}" "$API/contents/.sync-heartbeat.txt?ref=$BR" | jq -r '.sha // empty')"
+          content="$(printf 'keep-alive %s\n' "$(date -u +%FT%TZ)" | base64 -w0)"
+          if [ -n "$sha" ]; then
+            payload="{\"message\":\"chore: keep repository active\",\"content\":\"$content\",\"branch\":\"$BR\",\"sha\":\"$sha\"}"
+          else
+            payload="{\"message\":\"chore: keep repository active\",\"content\":\"$content\",\"branch\":\"$BR\"}"
+          fi
+          curl -sS "${H[@]}" -X PUT "$API/contents/.sync-heartbeat.txt" -d "$payload" \
+            | jq -r '.commit.sha // .message'
