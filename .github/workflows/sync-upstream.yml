@@ -5,7 +5,7 @@ name: Sync upstream (tushen6/Tomorrow)
 
 on:
   schedule:
-    - cron: '17 * * * *'   # 每小时第 17 分（UTC）检查一次上游
+    - cron: '27,32,37,42 * * * *'   # UTC 每小时第 27/32/37/42 分检查一次上游
   workflow_dispatch:        # 也可在 Actions 页面点 "Run workflow" 立即同步
 
 permissions:
